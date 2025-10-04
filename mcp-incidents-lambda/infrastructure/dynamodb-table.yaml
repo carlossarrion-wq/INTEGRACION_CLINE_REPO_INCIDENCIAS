@@ -1,0 +1,194 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: DynamoDB Table for Incident Management
+
+Resources:
+  # Tabla principal de incidencias
+  IncidentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: incidents
+      BillingMode: PAY_PER_REQUEST
+      
+      # Point-in-Time Recovery para backups
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      
+      # DynamoDB Streams (para uso futuro con batch sync)
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      
+      # Definición de atributos (solo los usados en keys e índices)
+      AttributeDefinitions:
+        # Claves primarias
+        - AttributeName: incident_id
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+        
+        # Atributos para GSI-1 (búsqueda por asignado)
+        - AttributeName: assigned_to
+          AttributeType: S
+        - AttributeName: status_priority_created
+          AttributeType: S
+        
+        # Atributos para GSI-2 (búsqueda por estado)
+        - AttributeName: status
+          AttributeType: S
+        - AttributeName: priority_created
+          AttributeType: S
+        
+        # Atributos para GSI-3 (búsqueda por sistema origen)
+        - AttributeName: source_system_external_id
+          AttributeType: S
+      
+      # Claves primarias de la tabla
+      KeySchema:
+        - AttributeName: incident_id
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      
+      # Índices Secundarios Globales
+      GlobalSecondaryIndexes:
+        # GSI-1: Búsqueda por desarrollador asignado
+        - IndexName: GSI-1-assigned-status
+          KeySchema:
+            - AttributeName: assigned_to
+              KeyType: HASH
+            - AttributeName: status_priority_created
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        
+        # GSI-2: Búsqueda por estado
+        - IndexName: GSI-2-status-priority
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+            - AttributeName: priority_created
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        
+        # GSI-3: Búsqueda por sistema origen (para sincronización)
+        - IndexName: GSI-3-source-external
+          KeySchema:
+            - AttributeName: source_system_external_id
+              KeyType: HASH
+            - AttributeName: sk
+              KeyType: RANGE
+          Projection:
+            ProjectionType: KEYS_ONLY
+      
+      # Tags
+      Tags:
+        - Key: Project
+          Value: IncidentManagement
+        - Key: Environment
+          Value: Production
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # Política IAM para acceso a la tabla desde Lambda
+  IncidentsTableAccessPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: IncidentsTableAccessPolicy
+      Description: Permite acceso CRUD a la tabla de incidencias
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DynamoDBTableAccess
+            Effect: Allow
+            Action:
+              - dynamodb:GetItem
+              - dynamodb:PutItem
+              - dynamodb:UpdateItem
+              - dynamodb:DeleteItem
+              - dynamodb:Query
+              - dynamodb:Scan
+              - dynamodb:BatchGetItem
+              - dynamodb:BatchWriteItem
+            Resource:
+              - !GetAtt IncidentsTable.Arn
+              - !Sub '${IncidentsTable.Arn}/index/*'
+
+  # Alarma para throttling
+  IncidentsTableThrottleAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: incidents-table-throttle
+      AlarmDescription: Alert when DynamoDB table is being throttled
+      MetricName: UserErrors
+      Namespace: AWS/DynamoDB
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: TableName
+          Value: !Ref IncidentsTable
+      TreatMissingData: notBreaching
+
+  # Alarma para errores del sistema
+  IncidentsTableSystemErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: incidents-table-system-errors
+      AlarmDescription: Alert when DynamoDB table has system errors
+      MetricName: SystemErrors
+      Namespace: AWS/DynamoDB
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: TableName
+          Value: !Ref IncidentsTable
+      TreatMissingData: notBreaching
+
+Outputs:
+  IncidentsTableName:
+    Description: Nombre de la tabla de incidencias
+    Value: !Ref IncidentsTable
+    Export:
+      Name: IncidentsTableName
+  
+  IncidentsTableArn:
+    Description: ARN de la tabla de incidencias
+    Value: !GetAtt IncidentsTable.Arn
+    Export:
+      Name: IncidentsTableArn
+  
+  IncidentsTableStreamArn:
+    Description: ARN del stream de la tabla (para uso futuro)
+    Value: !GetAtt IncidentsTable.StreamArn
+    Export:
+      Name: IncidentsTableStreamArn
+  
+  IncidentsTableAccessPolicyArn:
+    Description: ARN de la política de acceso a la tabla
+    Value: !Ref IncidentsTableAccessPolicy
+    Export:
+      Name: IncidentsTableAccessPolicyArn
+  
+  GSI1Name:
+    Description: Nombre del GSI para búsqueda por asignado
+    Value: GSI-1-assigned-status
+    Export:
+      Name: IncidentsTableGSI1Name
+  
+  GSI2Name:
+    Description: Nombre del GSI para búsqueda por estado
+    Value: GSI-2-status-priority
+    Export:
+      Name: IncidentsTableGSI2Name
+  
+  GSI3Name:
+    Description: Nombre del GSI para búsqueda por sistema origen
+    Value: GSI-3-source-external
+    Export:
+      Name: IncidentsTableGSI3Name

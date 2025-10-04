@@ -1,0 +1,268 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: KB Batch Sync Lambda - Sincroniza incidencias cerradas de DynamoDB a Knowledge Base
+
+Parameters:
+  IncidentsTableName:
+    Type: String
+    Default: incidents
+    Description: Nombre de la tabla DynamoDB de incidencias
+  
+  S3BucketName:
+    Type: String
+    Default: incident-analyzer-dev-incidents-dev
+    Description: Bucket S3 para documentos de Knowledge Base
+  
+  KnowledgeBaseId:
+    Type: String
+    Default: LPR1PEW0LN
+    Description: ID de la Knowledge Base de Bedrock
+  
+  BatchSize:
+    Type: Number
+    Default: 50
+    Description: Número máximo de incidencias a procesar por ejecución
+  
+  MaxSyncAttempts:
+    Type: Number
+    Default: 3
+    Description: Número máximo de intentos de sincronización antes de omitir
+
+Globals:
+  Function:
+    Runtime: nodejs20.x
+    Architectures:
+      - arm64
+    Environment:
+      Variables:
+        LOG_LEVEL: INFO
+
+Resources:
+  # Lambda Function - Sincronización Batch
+  KBBatchSyncFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: incident-kb-batch-sync
+      CodeUri: ../dist
+      Handler: kb-batch-sync.handler
+      Description: Sincroniza incidencias cerradas desde DynamoDB a Knowledge Base vía S3
+      Timeout: 300  # 5 minutos
+      MemorySize: 1024
+      Environment:
+        Variables:
+          INCIDENTS_TABLE: !Ref IncidentsTableName
+          S3_BUCKET: !Ref S3BucketName
+          S3_PREFIX: incidents/closed/
+          KB_ID: !Ref KnowledgeBaseId
+          BATCH_SIZE: !Ref BatchSize
+          MAX_SYNC_ATTEMPTS: !Ref MaxSyncAttempts
+      Policies:
+        # Acceso a DynamoDB
+        - Statement:
+            - Sid: DynamoDBReadWrite
+              Effect: Allow
+              Action:
+                - dynamodb:Query
+                - dynamodb:UpdateItem
+                - dynamodb:GetItem
+              Resource:
+                - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${IncidentsTableName}'
+                - !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${IncidentsTableName}/index/*'
+        # Acceso a S3
+        - Statement:
+            - Sid: S3WriteAccess
+              Effect: Allow
+              Action:
+                - s3:PutObject
+                - s3:PutObjectAcl
+              Resource: !Sub 'arn:aws:s3:::${S3BucketName}/incidents/closed/*'
+        # Acceso a CloudWatch Metrics
+        - Statement:
+            - Sid: CloudWatchMetrics
+              Effect: Allow
+              Action:
+                - cloudwatch:PutMetricData
+              Resource: '*'
+      Events:
+        # EventBridge Schedule
+        HourlySync:
+          Type: Schedule
+          Properties:
+            Schedule: "cron(0 * * * ? *)"
+            Description: Sincroniza incidencias cerradas con KB cada hora
+            Enabled: true
+            Name: incident-kb-batch-sync-schedule
+      Tags:
+        Project: MCP-Incidents
+        Component: KB-Sync
+        Environment: Production
+
+  # CloudWatch Log Group
+  KBBatchSyncLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${KBBatchSyncFunction}'
+      RetentionInDays: 7
+
+  # CloudWatch Alarm - Errores
+  KBBatchSyncErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: incident-kb-batch-sync-errors
+      AlarmDescription: Alert when batch sync has high error rate
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref KBBatchSyncFunction
+      TreatMissingData: notBreaching
+
+  # CloudWatch Alarm - Duración
+  KBBatchSyncDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: incident-kb-batch-sync-high-duration
+      AlarmDescription: Alert when batch sync takes too long
+      MetricName: Duration
+      Namespace: AWS/Lambda
+      Statistic: Average
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 240000  # 4 minutos (warning antes del timeout de 5 min)
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref KBBatchSyncFunction
+      TreatMissingData: notBreaching
+
+  # CloudWatch Alarm - Métricas personalizadas de sincronización
+  KBSyncFailuresAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: incident-kb-sync-high-failures
+      AlarmDescription: Alert when many incidents fail to sync
+      MetricName: SyncErrors
+      Namespace: IncidentManagement/KBSync
+      Statistic: Sum
+      Period: 3600
+      EvaluationPeriods: 1
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      TreatMissingData: notBreaching
+
+  # Dashboard CloudWatch
+  KBSyncDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: incident-kb-sync-dashboard
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["IncidentManagement/KBSync", "IncidentsFound"],
+                  [".", "IncidentsSynced"],
+                  [".", "SyncErrors"],
+                  [".", "IncidentsSkipped"]
+                ],
+                "period": 3600,
+                "stat": "Sum",
+                "region": "${AWS::Region}",
+                "title": "Incidents Sync Status (Hourly)",
+                "yAxis": {
+                  "left": {
+                    "min": 0
+                  }
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["IncidentManagement/KBSync", "SyncDuration"]
+                ],
+                "period": 3600,
+                "stat": "Average",
+                "region": "${AWS::Region}",
+                "title": "Sync Duration (ms)",
+                "yAxis": {
+                  "left": {
+                    "min": 0
+                  }
+                }
+              }
+            },
+            {
+              "type": "metric",
+              "properties": {
+                "metrics": [
+                  ["AWS/Lambda", "Invocations", {"stat": "Sum", "label": "Invocations"}],
+                  [".", "Errors", {"stat": "Sum", "label": "Errors"}],
+                  [".", "Throttles", {"stat": "Sum", "label": "Throttles"}]
+                ],
+                "period": 3600,
+                "stat": "Sum",
+                "region": "${AWS::Region}",
+                "title": "Lambda Metrics",
+                "yAxis": {
+                  "left": {
+                    "min": 0
+                  }
+                }
+              }
+            },
+            {
+              "type": "log",
+              "properties": {
+                "query": "SOURCE '${KBBatchSyncLogGroup}'\n| fields @timestamp, @message\n| filter @message like /Successfully synced/\n| sort @timestamp desc\n| limit 20",
+                "region": "${AWS::Region}",
+                "title": "Recent Successful Syncs",
+                "stacked": false
+              }
+            },
+            {
+              "type": "log",
+              "properties": {
+                "query": "SOURCE '${KBBatchSyncLogGroup}'\n| fields @timestamp, @message\n| filter @message like /Failed to sync/\n| sort @timestamp desc\n| limit 20",
+                "region": "${AWS::Region}",
+                "title": "Recent Failed Syncs",
+                "stacked": false
+              }
+            }
+          ]
+        }
+
+Outputs:
+  KBBatchSyncFunctionArn:
+    Description: ARN de la función Lambda de sincronización batch
+    Value: !GetAtt KBBatchSyncFunction.Arn
+    Export:
+      Name: IncidentKBBatchSyncArn
+
+  KBBatchSyncFunctionName:
+    Description: Nombre de la función Lambda de sincronización batch
+    Value: !Ref KBBatchSyncFunction
+    Export:
+      Name: IncidentKBBatchSyncName
+
+  LogGroupName:
+    Description: Nombre del CloudWatch Log Group
+    Value: !Ref KBBatchSyncLogGroup
+    Export:
+      Name: IncidentKBBatchSyncLogGroup
+
+  DashboardURL:
+    Description: URL del dashboard de CloudWatch
+    Value: !Sub 'https://console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${KBSyncDashboard}'
+
+  ScheduleExpression:
+    Description: Expresión de programación de EventBridge
+    Value: "cron(0 * * * ? *)"

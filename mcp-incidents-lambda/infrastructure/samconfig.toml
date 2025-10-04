@@ -1,0 +1,10 @@
+version = 0.1
+
+[default.deploy.parameters]
+stack_name = "incident-kb-sync-stack"
+region = "eu-west-1"
+capabilities = "CAPABILITY_IAM"
+parameter_overrides = "IncidentsTableName=incidents S3BucketName=incident-analyzer-dev-incidents-dev KnowledgeBaseId=LPR1PEW0LN SyncSchedule=\"rate(1 hour)\""
+resolve_s3 = true
+confirm_changeset = false
+fail_on_empty_changeset = false

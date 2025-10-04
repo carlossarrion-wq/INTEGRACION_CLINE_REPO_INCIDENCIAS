@@ -1,0 +1,115 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: MCP Lambda Wrapper for Incident Analysis - Local Server Architecture
+
+Globals:
+  Function:
+    Timeout: 300
+    MemorySize: 1024
+    Runtime: nodejs20.x
+    Architectures:
+      - arm64
+    Environment:
+      Variables:
+        BEDROCK_KNOWLEDGE_BASE_ID: VH6SRH9ZNO
+        BEDROCK_MODEL_ID: eu.anthropic.claude-sonnet-4-5-20250929-v1:0
+        BEDROCK_REGION: eu-west-1
+        LOG_LEVEL: INFO
+
+Resources:
+  # Lambda Function - Wrapper para acceso a Bedrock Knowledge Base
+  # Será invocada directamente por el servidor MCP local usando AWS SDK
+  MCPServerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: mcp-incidents-kb-wrapper
+      CodeUri: ../dist
+      Handler: index.handler
+      Description: Lambda wrapper for Bedrock Knowledge Base access - invoked by local MCP server
+      Policies:
+        - Statement:
+            - Sid: BedrockKnowledgeBaseAccess
+              Effect: Allow
+              Action:
+                - bedrock:Retrieve
+                - bedrock:RetrieveAndGenerate
+              Resource: !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/VH6SRH9ZNO'
+            - Sid: BedrockModelAccess
+              Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
+              Resource:
+                - 'arn:aws:bedrock:*::foundation-model/*'
+                - !Sub 'arn:aws:bedrock:*:${AWS::AccountId}:inference-profile/*'
+            - Sid: S3ReadAccess
+              Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource: 'arn:aws:s3:::piloto-plan-pruebas-origen-datos-source/*'
+      Tags:
+        Project: MCP-Incidents
+        Environment: Production
+        Architecture: Local-MCP-Server
+
+  # CloudWatch Logs - Para debugging y monitoreo
+  MCPServerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${MCPServerFunction}'
+      RetentionInDays: 7
+
+  # CloudWatch Alarm - Monitoreo de errores
+  MCPServerErrorAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: mcp-incidents-kb-wrapper-high-error-rate
+      AlarmDescription: Alert when Lambda wrapper has high error rate
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref MCPServerFunction
+      TreatMissingData: notBreaching
+
+  # CloudWatch Alarm - Monitoreo de duración
+  MCPServerDurationAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: mcp-incidents-kb-wrapper-high-duration
+      AlarmDescription: Alert when Lambda wrapper execution time is high
+      MetricName: Duration
+      Namespace: AWS/Lambda
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 60000
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: FunctionName
+          Value: !Ref MCPServerFunction
+      TreatMissingData: notBreaching
+
+Outputs:
+  MCPServerArn:
+    Description: ARN de la función Lambda wrapper
+    Value: !GetAtt MCPServerFunction.Arn
+    Export:
+      Name: MCPIncidentsKBWrapperArn
+
+  MCPServerName:
+    Description: Nombre de la función Lambda wrapper
+    Value: !Ref MCPServerFunction
+    Export:
+      Name: MCPIncidentsKBWrapperName
+
+  LogGroupName:
+    Description: Nombre del CloudWatch Log Group
+    Value: !Ref MCPServerLogGroup
+    Export:
+      Name: MCPIncidentsKBWrapperLogGroup
